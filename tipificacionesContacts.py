@@ -158,10 +158,13 @@ BAD_RECORD_RULE = {
     "Tel_Marcado_CC": "5585327633",
 }
 
-PBIX_JV_DISPLAY_SUPERVISORS = {
-    "MARIA FERNANDA",
-    "JORGE MIGUEL",
+JV_SUPERVISOR_DISPLAY_MAP = {
+    "MARIA FERNANDA": "MARIA FERNANDA MARTINEZ BISTRAIN",
+    "JORGE MIGUEL": "JORGE MIGUEL URENA ZARATE",
+    "MARIA LUISA": "MARIA LUISA",
 }
+
+PBIX_JV_DISPLAY_SUPERVISORS = set(JV_SUPERVISOR_DISPLAY_MAP.values())
 
 PBIX_CC2_DISPLAY_SUPERVISORS = {
     "ALAN UZIEL SALAZAR AGUILAR",
@@ -244,7 +247,6 @@ def compute_business_reference_day(today: date) -> date:
     is_feb3 = today.month == 2 and today.day == 3
     is_mar16 = today.month == 3 and today.day == 16
     is_mar17 = today.month == 3 and today.day == 17
-    is_apr6_2026 = today == date(2026, 4, 6)
 
     if is_dec26:
         return date(today.year, 12, 24)
@@ -258,8 +260,6 @@ def compute_business_reference_day(today: date) -> date:
         return today - timedelta(days=2)
     elif is_mar17:
         return today - timedelta(days=3)
-    elif is_apr6_2026:
-        return date(2026, 4, 2)
     elif ayer1.weekday() == 6:
         return today - timedelta(days=2)
     else:
@@ -318,6 +318,12 @@ def canonical_supervisor_name(supervisor_raw):
     ):
         return "MARIA FERNANDA"
 
+    if (
+        "MARIA LUISA" in sup
+        or sup in {"LUISA", "MARIA LUIZA", "MARIA LUISA"}
+    ):
+        return "MARIA LUISA"
+
     # CC2
     if "REYNA" in sup:
         return "REYNA LIZZETTE MARTINEZ GARCIA"
@@ -346,8 +352,8 @@ def normalize_supervisor_display(centro, supervisor_raw):
         return "SIN SUPERVISOR"
 
     if centro == "JV":
-        if sup in PBIX_JV_DISPLAY_SUPERVISORS:
-            return sup
+        if sup in JV_SUPERVISOR_DISPLAY_MAP:
+            return JV_SUPERVISOR_DISPLAY_MAP[sup]
         return "SIN SUPERVISOR JV"
 
     if centro == "CC2":
