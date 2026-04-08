@@ -424,6 +424,19 @@ def map_sistema_to_centro(x) -> str:
     return s if s else "N/A"
 
 
+def infer_center_from_supervisor(supervisor_raw, sistema_raw=None) -> str:
+    sup = canonical_supervisor_name(supervisor_raw)
+
+    if sup in {"MARIA FERNANDA", "MARIA LUISA", "JORGE MIGUEL", "SIN SUPERVISOR JV"}:
+        return "JV"
+
+    if sup in CC2_ALLOWED_DISPLAY or sup == "SIN SUPERVISOR":
+        return "CC2"
+
+    fallback = map_sistema_to_centro(sistema_raw)
+    return fallback if fallback in {"JV", "CC2"} else "N/A"
+
+
 def build_detail_rename_map(team_col: str, agent_col: str) -> dict:
     rename_map = {
         "Centro": "Centro",
@@ -750,7 +763,10 @@ def build_consolidado_exact(jv_df: pd.DataFrame, cc2_df: pd.DataFrame) -> pd.Dat
     combined = combined.drop_duplicates(subset=["Tel_Marcado_CC"], keep="first").copy()
     combined = combined.drop(columns=["_SysOrder"])
 
-    combined["Centro"] = combined["Sistema"].apply(map_sistema_to_centro)
+    combined["Centro"] = [
+        infer_center_from_supervisor(sup, sis)
+        for sup, sis in zip(combined["Calificacion_Int_CC"], combined["Sistema"])
+    ]
     combined["Tipificacion_Detalle"] = combined["Estatus_CC"].apply(normalize_status)
     combined["Tipificacion_3"] = combined["Estatus_CC"].apply(status_group_3)
     combined["Tipificacion_3_Abbr"] = combined["Tipificacion_3"].map(TIP_ABBR).fillna("OTR")
