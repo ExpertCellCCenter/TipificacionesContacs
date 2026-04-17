@@ -388,6 +388,7 @@ def apply_powerbi_center_page_scope(df: pd.DataFrame) -> pd.DataFrame:
 
     out["Centro"] = out["Centro"].fillna("").astype(str).str.strip().str.upper()
     out["Cliente_CC_UP"] = out["Cliente_CC"].fillna("").astype(str).str.strip().str.upper()
+    out["Cliente_Centro"] = out["Cliente_CC"].map(infer_center_from_cliente)
     out["Gestor_CC_CLEAN_TMP"] = out["Gestor_CC"].map(clean_name)
 
     sup = get_supervisores_cc2()
@@ -397,13 +398,13 @@ def apply_powerbi_center_page_scope(df: pd.DataFrame) -> pd.DataFrame:
 
     jv = out[
         (out["Centro"] == "JV") &
-        (out["Cliente_CC_UP"] == "EXPERT CELL") &
+        (out["Cliente_Centro"] == "JV") &
         (out["Supervisor_Display"].isin(PBIX_JV_DISPLAY_SUPERVISORS))
     ].copy()
 
     cc2 = out[
         (out["Centro"] == "CC2") &
-        (out["Cliente_CC_UP"] == "CCENTER2-EXPERTCELL") &
+        (out["Cliente_Centro"] == "CC2") &
         (out["Supervisor_Display"].isin(PBIX_CC2_DISPLAY_SUPERVISORS))
     ].copy()
 
@@ -412,7 +413,7 @@ def apply_powerbi_center_page_scope(df: pd.DataFrame) -> pd.DataFrame:
 
     final = pd.concat([jv, cc2], ignore_index=True)
 
-    return final.drop(columns=["Cliente_CC_UP", "Gestor_CC_CLEAN_TMP"], errors="ignore")
+    return final.drop(columns=["Cliente_CC_UP", "Cliente_Centro", "Gestor_CC_CLEAN_TMP"], errors="ignore")
 
 
 def map_sistema_to_centro(x) -> str:
@@ -424,7 +425,27 @@ def map_sistema_to_centro(x) -> str:
     return s if s else "N/A"
 
 
-def infer_center_from_supervisor(supervisor_raw, sistema_raw=None) -> str:
+def infer_center_from_cliente(cliente_raw) -> str:
+    cliente = clean_name(cliente_raw) or ""
+    cliente_compact = "".join(cliente.split())
+
+    if not cliente_compact:
+        return ""
+
+    if "CCENTER2EXPERTCELL" in cliente_compact:
+        return "CC2"
+
+    if "EXPERTCELL" in cliente_compact:
+        return "JV"
+
+    return ""
+
+
+def infer_center_from_supervisor(supervisor_raw, sistema_raw=None, cliente_raw=None) -> str:
+    cliente_center = infer_center_from_cliente(cliente_raw)
+    if cliente_center in {"JV", "CC2"}:
+        return cliente_center
+
     sup = canonical_supervisor_name(supervisor_raw)
 
     if sup in {"MARIA FERNANDA", "MARIA LUISA", "JORGE MIGUEL", "SIN SUPERVISOR JV"}:
@@ -764,8 +785,8 @@ def build_consolidado_exact(jv_df: pd.DataFrame, cc2_df: pd.DataFrame) -> pd.Dat
     combined = combined.drop(columns=["_SysOrder"])
 
     combined["Centro"] = [
-        infer_center_from_supervisor(sup, sis)
-        for sup, sis in zip(combined["Calificacion_Int_CC"], combined["Sistema"])
+        infer_center_from_supervisor(sup, sis, cli)
+        for sup, sis, cli in zip(combined["Calificacion_Int_CC"], combined["Sistema"], combined["Cliente_CC"])
     ]
     combined["Tipificacion_Detalle"] = combined["Estatus_CC"].apply(normalize_status)
     combined["Tipificacion_3"] = combined["Estatus_CC"].apply(status_group_3)
