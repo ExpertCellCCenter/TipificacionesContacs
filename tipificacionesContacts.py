@@ -3,12 +3,14 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
+from openpyxl.utils import get_column_letter
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import pyodbc
 import requests
 import streamlit as st
+from openpyxl.utils import get_column_letter
 
 
 # -------------------------------
@@ -162,6 +164,9 @@ JV_SUPERVISOR_DISPLAY_MAP = {
     "MARIA FERNANDA": "MARIA FERNANDA MARTINEZ BISTRAIN",
     "JORGE MIGUEL": "JORGE MIGUEL URENA ZARATE",
     "MARIA LUISA": "MARIA LUISA",
+    "EMILIO": "EMILIO RAFAEL CORNU AGUILAR",
+    "EMILIO RAFAEL": "EMILIO RAFAEL CORNU AGUILAR",
+    "CARMEN": "CARMEN RIVAS GONZALEZ",
 }
 
 PBIX_JV_DISPLAY_SUPERVISORS = set(JV_SUPERVISOR_DISPLAY_MAP.values())
@@ -171,6 +176,7 @@ PBIX_CC2_DISPLAY_SUPERVISORS = {
     "ALFREDO CABRERA PADRON",
     "CARLOS ALBERTO AGUILAR CANO",
     "REYNA LIZZETTE MARTINEZ GARCIA",
+    "ANA PAOLA DE LA FUENTE GUARNEROS",
 }
 
 CC2_SPECIAL_BUCKETS = {
@@ -324,6 +330,12 @@ def canonical_supervisor_name(supervisor_raw):
     ):
         return "MARIA LUISA"
 
+    if (
+        "EMILIO RAFAEL" in sup
+        or sup in {"EMILIO", "EMILIO R", "EMILIO R.", "EMILIO RAFAEL", "EMILIO RAFAEL CORNU AGUILAR"}
+    ):
+        return "EMILIO RAFAEL"
+
     # CC2
     if "REYNA" in sup:
         return "REYNA LIZZETTE MARTINEZ GARCIA"
@@ -448,7 +460,7 @@ def infer_center_from_supervisor(supervisor_raw, sistema_raw=None, cliente_raw=N
 
     sup = canonical_supervisor_name(supervisor_raw)
 
-    if sup in {"MARIA FERNANDA", "MARIA LUISA", "JORGE MIGUEL", "SIN SUPERVISOR JV"}:
+    if sup in {"MARIA FERNANDA", "MARIA LUISA", "JORGE MIGUEL", "EMILIO RAFAEL", "SIN SUPERVISOR JV"}:
         return "JV"
 
     if sup in CC2_ALLOWED_DISPLAY or sup == "SIN SUPERVISOR":
@@ -1110,6 +1122,31 @@ def build_pbix_agent_table(df: pd.DataFrame, team_col: str, agent_col: str) -> p
     return pd.DataFrame(rows).sort_values([team_col, agent_col]).reset_index(drop=True)
 
 
+def format_excel_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
+    worksheet = writer.sheets.get(sheet_name)
+    if worksheet is None:
+        return
+
+    max_row = len(df) + 1
+    max_col = len(df.columns)
+
+    if max_col > 0:
+        worksheet.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
+
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        header_len = len(str(col_name))
+        cell_lengths = [header_len]
+
+        if col_name in df.columns:
+            series = df[col_name]
+            non_null_values = series.dropna().astype(str)
+            if not non_null_values.empty:
+                cell_lengths.append(int(non_null_values.map(len).max()))
+
+        adjusted_width = min(max(max(cell_lengths) + 2, 12), 60)
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = adjusted_width
+
+
 def make_excel(
     detail_df: pd.DataFrame,
     summary_tip: pd.DataFrame,
@@ -1119,9 +1156,206 @@ def make_excel(
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         summary_tip.to_excel(writer, sheet_name="Resumen_Tipificacion", index=False)
+        format_excel_sheet(writer, "Resumen_Tipificacion", summary_tip)
+
         summary_team.to_excel(writer, sheet_name="Resumen_Equipo", index=False)
+        format_excel_sheet(writer, "Resumen_Equipo", summary_team)
+
         summary_agent.to_excel(writer, sheet_name="Resumen_Agente", index=False)
+        format_excel_sheet(writer, "Resumen_Agente", summary_agent)
+
         detail_df.to_excel(writer, sheet_name="Detalle", index=False)
+        format_excel_sheet(writer, "Detalle", detail_df)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def is_agenda_buzon_value(x) -> bool:
+    txt = clean_name(x)
+    if not txt:
+        return False
+    return "AGENDA BUZON" in txt or ("AGENDA" in txt and "BUZON" in txt)
+
+
+def build_agenda_buzon_sample(df: pd.DataFrame, team_col: str, agent_col: str, rows_per_agent: int = 2) -> pd.DataFrame:
+    if df.empty:
+        return df.iloc[0:0].copy()
+
+    work_local = df.copy()
+
+    if team_col not in work_local.columns:
+        work_local[team_col] = "Sin supervisor"
+    if agent_col not in work_local.columns:
+        work_local[agent_col] = "Sin agente"
+
+    work_local[team_col] = work_local[team_col].replace("", np.nan).fillna("Sin supervisor").astype(str)
+    work_local[agent_col] = work_local[agent_col].replace("", np.nan).fillna("Sin agente").astype(str)
+
+    candidate_cols = [
+        "Tipificacion_Detalle",
+        "Estatus_CC",
+        "Codigo_Accion_CC",
+        "Codigo_Resultado_CC",
+        "Obs_CC",
+        "Descripcion_sip_CC",
+    ]
+
+    mask = pd.Series(False, index=work_local.index)
+    for col in candidate_cols:
+        if col in work_local.columns:
+            mask = mask | work_local[col].map(is_agenda_buzon_value)
+
+    agenda_df = work_local[mask].copy()
+
+    if agenda_df.empty:
+        return agenda_df
+
+    group_cols = [c for c in ["Centro", team_col, agent_col] if c in agenda_df.columns]
+
+    sampled_parts = []
+    for _, g in agenda_df.groupby(group_cols, dropna=False):
+        take_n = min(rows_per_agent, len(g))
+        sampled_parts.append(g.sample(n=take_n))
+
+    if not sampled_parts:
+        return agenda_df.iloc[0:0].copy()
+
+    sampled = pd.concat(sampled_parts, ignore_index=True)
+
+    sort_cols = [c for c in ["Centro", team_col, agent_col, "Fecha_CC"] if c in sampled.columns]
+    if sort_cols:
+        ascending = [True] * max(0, len(sort_cols) - 1) + [False]
+        sampled = sampled.sort_values(sort_cols, ascending=ascending)
+
+    return sampled.reset_index(drop=True)
+
+
+def apply_agenda_buzon_corte(df: pd.DataFrame, corte_label: str) -> pd.DataFrame:
+    if df.empty or "Fecha_CC" not in df.columns:
+        return df.copy()
+
+    out = df.copy()
+    fecha = pd.to_datetime(out["Fecha_CC"], errors="coerce")
+    out = out.loc[fecha.notna()].copy()
+    fecha = pd.to_datetime(out["Fecha_CC"], errors="coerce")
+
+    minutos = fecha.dt.hour * 60 + fecha.dt.minute
+    corte_4pm = 16 * 60
+
+    if corte_label == "Inicio del día a 4:00 PM":
+        return out.loc[minutos < corte_4pm].copy()
+
+    if corte_label == "4:00 PM al fin del día":
+        return out.loc[minutos >= corte_4pm].copy()
+
+    return out.copy()
+
+
+def build_agenda_buzon_export_df(sample_df: pd.DataFrame, team_col: str, agent_col: str) -> pd.DataFrame:
+    export_df = sample_df.copy()
+
+    if "Cliente_CC" in export_df.columns:
+        cliente_center = export_df["Cliente_CC"].map(infer_center_from_cliente)
+        if "Centro" in export_df.columns:
+            export_df["Centro"] = np.where(
+                cliente_center.isin(["JV", "CC2"]),
+                cliente_center,
+                export_df["Centro"]
+            )
+        else:
+            export_df["Centro"] = cliente_center
+
+    preferred_cols = [
+        "Centro", team_col, agent_col, "Fecha_CC", "Tipificacion_Detalle", "Tipificacion_3",
+        "Tel_Marcado_CC", "Campaña_CC", "Cliente_CC", "Duracion_CC", "Duracion_Min_CC",
+        "Codigo_Accion_CC", "Codigo_Resultado_CC", "Extension_CC", "Calificacion_Int_CC",
+        "Descripcion_sip_CC", "Obs_CC", "Campo_Clave", "Grabacion_CC", "Sistema"
+    ]
+    preferred_cols = [c for c in preferred_cols if c in export_df.columns]
+    export_df = export_df[preferred_cols].copy()
+
+    rename_map = {
+        "Centro": "Centro",
+        team_col: "Supervisor",
+        agent_col: "Ejecutivo",
+        "Fecha_CC": "Fecha",
+        "Tipificacion_Detalle": "Tipificación detalle",
+        "Tipificacion_3": "Tipificación general",
+        "Tel_Marcado_CC": "Teléfono",
+        "Campaña_CC": "Campaña",
+        "Cliente_CC": "Cliente",
+        "Duracion_CC": "Duración (seg)",
+        "Duracion_Min_CC": "Duración (min)",
+        "Codigo_Accion_CC": "Código acción",
+        "Codigo_Resultado_CC": "Código resultado",
+        "Extension_CC": "Extensión",
+        "Calificacion_Int_CC": "Supervisor original",
+        "Descripcion_sip_CC": "Descripción SIP",
+        "Obs_CC": "Observaciones",
+        "Campo_Clave": "Campo clave",
+        "Grabacion_CC": "Grabación",
+        "Sistema": "Sistema",
+    }
+    export_df = export_df.rename(columns=rename_map)
+
+    sort_cols = [c for c in ["Supervisor", "Ejecutivo", "Fecha"] if c in export_df.columns]
+    if sort_cols:
+        ascending = [True] * max(0, len(sort_cols) - 1) + [False]
+        export_df = export_df.sort_values(sort_cols, ascending=ascending)
+
+    return export_df.reset_index(drop=True)
+
+
+def safe_excel_sheet_name(name: str, used_names: set) -> str:
+    base = str(name) if str(name).strip() else "Sin_supervisor"
+    base = (
+        base.replace("\\", " ")
+            .replace("/", " ")
+            .replace("*", " ")
+            .replace("?", " ")
+            .replace(":", " ")
+            .replace("[", " ")
+            .replace("]", " ")
+    )
+    base = " ".join(base.split()).strip()
+
+    if not base:
+        base = "Sin_supervisor"
+
+    base = base[:31]
+    final_name = base
+    i = 1
+
+    while final_name in used_names:
+        suffix = f"_{i}"
+        final_name = f"{base[:31-len(suffix)]}{suffix}"
+        i += 1
+
+    used_names.add(final_name)
+    return final_name
+
+
+def make_agenda_buzon_excel(sample_df: pd.DataFrame, team_col: str, agent_col: str, corte_label: str, centro_label: str) -> bytes:
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        if sample_df.empty:
+            empty_df = pd.DataFrame({
+                "Centro": [centro_label],
+                "Corte": [corte_label],
+                "Mensaje": ["No se encontraron registros de Agenda Buzón con los filtros seleccionados."]
+            })
+            empty_df.to_excel(writer, sheet_name="Sin_registros", index=False)
+            format_excel_sheet(writer, "Sin_registros", empty_df)
+        else:
+            used_sheet_names = set()
+
+            for supervisor, g in sample_df.groupby(team_col, dropna=False):
+                sheet_name = safe_excel_sheet_name(str(supervisor), used_sheet_names)
+                export_df = build_agenda_buzon_export_df(g, team_col, agent_col)
+                export_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                format_excel_sheet(writer, sheet_name, export_df)
+
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -1158,6 +1392,12 @@ with st.sidebar:
         "Nivel de detalle",
         ["Resumen general", "Detalle completo"],
         index=1
+    )
+    st.subheader("Exportación Agenda Buzón")
+    agenda_corte = st.radio(
+        "Selecciona el corte",
+        ["Todo el día", "Inicio del día a 4:00 PM", "4:00 PM al fin del día"],
+        index=0
     )
 
 
@@ -1245,6 +1485,8 @@ with st.sidebar:
     selected_agents = st.multiselect("Agente", agent_options, default=agent_options)
 
     work_agent = work_team[work_team[agent_col].isin(selected_agents)].copy() if selected_agents else work_team.iloc[0:0].copy()
+
+    agenda_export_base = work_agent.copy()
 
     tip_options = sorted(work_agent[tip_col].dropna().astype(str).unique().tolist())
     selected_tip = st.multiselect("Tipificación", tip_options, default=tip_options)
@@ -1602,3 +1844,75 @@ st.download_button(
     file_name=f"cc2_jv_tipificacion_{source_date}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+agenda_buzon_base_filtered = apply_agenda_buzon_corte(
+    agenda_export_base,
+    corte_label=agenda_corte
+)
+
+agenda_buzon_sample = build_agenda_buzon_sample(
+    agenda_buzon_base_filtered,
+    team_col=team_col,
+    agent_col=agent_col,
+    rows_per_agent=2
+)
+
+if "Cliente_CC" in agenda_buzon_sample.columns:
+    agenda_buzon_cliente_centro = agenda_buzon_sample["Cliente_CC"].map(infer_center_from_cliente)
+else:
+    agenda_buzon_cliente_centro = pd.Series("", index=agenda_buzon_sample.index, dtype="object")
+
+if "Centro" in agenda_buzon_sample.columns:
+    agenda_buzon_centro_fallback = agenda_buzon_sample["Centro"].fillna("").astype(str).str.upper()
+else:
+    agenda_buzon_centro_fallback = pd.Series("", index=agenda_buzon_sample.index, dtype="object")
+
+agenda_buzon_jv = agenda_buzon_sample[
+    (agenda_buzon_cliente_centro == "JV") |
+    ((agenda_buzon_cliente_centro == "") & (agenda_buzon_centro_fallback == "JV"))
+].copy()
+
+agenda_buzon_cc2 = agenda_buzon_sample[
+    (agenda_buzon_cliente_centro == "CC2") |
+    ((agenda_buzon_cliente_centro == "") & (agenda_buzon_centro_fallback == "CC2"))
+].copy()
+
+agenda_buzon_jv_excel_bytes = make_agenda_buzon_excel(
+    agenda_buzon_jv,
+    team_col=team_col,
+    agent_col=agent_col,
+    corte_label=agenda_corte,
+    centro_label="JV"
+)
+
+agenda_buzon_cc2_excel_bytes = make_agenda_buzon_excel(
+    agenda_buzon_cc2,
+    team_col=team_col,
+    agent_col=agent_col,
+    corte_label=agenda_corte,
+    centro_label="CC2"
+)
+
+if agenda_corte == "Inicio del día a 4:00 PM":
+    corte_file_tag = "inicio_a_4pm"
+elif agenda_corte == "4:00 PM al fin del día":
+    corte_file_tag = "4pm_a_fin"
+else:
+    corte_file_tag = "todo_el_dia"
+
+col_dl1, col_dl2 = st.columns(2)
+with col_dl1:
+    st.download_button(
+        "Descargar Agenda Buzón JV",
+        data=agenda_buzon_jv_excel_bytes,
+        file_name=f"agenda_buzon_jv_{corte_file_tag}_{source_date}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+with col_dl2:
+    st.download_button(
+        "Descargar Agenda Buzón CC2",
+        data=agenda_buzon_cc2_excel_bytes,
+        file_name=f"agenda_buzon_cc2_{corte_file_tag}_{source_date}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
